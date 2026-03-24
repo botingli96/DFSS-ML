@@ -1,0 +1,554 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[3]:
+
+
+# Ask the user to input the name format
+name_format = "huge_test"
+print("Run:", name_format)
+
+# Function to generate file names based on the input format
+def generate_filename(base_name, extension):
+    return f"{name_format}_{base_name}.{extension}"
+
+
+# In[42]:
+
+
+import h5py
+import os
+import numpy as np
+from scipy.interpolate import interp1d
+
+# Load data from the .h5 file
+def load_h5_data(file_path):
+    print("Loading data...", flush=True)
+    with h5py.File(file_path, 'r') as hdf:
+        results_group = hdf['results']
+
+        # Access the references from the datasets in the group
+        B_MAG_refs = results_group['B_MAG'][()]
+        EDC_MAG_refs = results_group['EDC_MAG'][()]
+        X_refs = results_group['X'][()]
+        I_refs = results_group['I'][()]
+
+        # Dereference the object references and extract the actual data
+        B_MAG_raw = [hdf[ref][()] for ref in B_MAG_refs.flatten()]
+        EDC_MAG_raw = [hdf[ref][()] for ref in EDC_MAG_refs.flatten()]
+        X_raw = [hdf[ref][()] for ref in X_refs.flatten()]
+        I_raw = [hdf[ref][()] for ref in I_refs.flatten()]
+
+    return B_MAG_raw, EDC_MAG_raw, X_raw, I_raw
+
+# Resample and smooth data function
+def resample_and_smooth(X, I, new_length):
+    # Define new X as evenly spaced values between min and max of the original X
+    X_new = np.linspace(X.min(), X.max(), num=new_length)
+    
+    # Interpolate the I values over the new X values
+    f = interp1d(X, I, kind='cubic', fill_value="extrapolate")  # 'cubic' provides smoothing
+    I_new = f(X_new)
+    
+    return X_new, I_new
+
+# Process the raw data and resample where necessary
+def process_data(B_MAG_raw, EDC_MAG_raw, X_raw, I_raw, fixed_length=1200):
+    print("Processing data...", flush=True)
+
+    X_data = []
+    I_data = []
+    B_MAG_data = []
+    EDC_MAG_data = []
+
+    for i in range(len(X_raw)):
+        X = np.squeeze(X_raw[i])
+        I = np.squeeze(I_raw[i])
+        B = np.squeeze(B_MAG_raw[i])
+        EDC = np.squeeze(EDC_MAG_raw[i])
+
+        # Resample X and smooth I correspondingly
+        X_resampled, I_resampled = resample_and_smooth(X, I, fixed_length)
+        
+        # Store the resampled data
+        X_data.append(X_resampled)
+        I_data.append(I_resampled)
+        B_MAG_data.append(B)
+        EDC_MAG_data.append(EDC)
+
+    # Convert lists to numpy arrays
+    X_data = np.array(X_data)
+    I_data = np.array(I_data)
+    B_MAG_data = np.array(B_MAG_data)
+    EDC_MAG_data = np.array(EDC_MAG_data)
+
+    return B_MAG_data, EDC_MAG_data, X_data, I_data
+
+# Main execution
+file_path = os.path.join('MATLAB_DATA', 'results3.mat')
+
+# Load the raw data from the file
+B_MAG_raw, EDC_MAG_raw, X_raw, I_raw = load_h5_data(file_path)
+
+# Process the raw data
+B_MAG_data, EDC_MAG_data, X_data, I_data = process_data(B_MAG_raw, EDC_MAG_raw, X_raw, I_raw)
+
+# Final print statements to verify the shapes of the processed data
+print("X_data shape:", X_data.shape)
+print("I_data shape:", I_data.shape)
+print("B_MAG_data shape:", B_MAG_data.shape)
+print("EDC_MAG_data shape:", EDC_MAG_data.shape)
+print("Data loaded and processed.", flush=True)
+
+
+# In[ ]:
+
+
+import numpy as np
+
+# Assuming I_data is your input numpy array
+# Step 1: Calculate the mean of each column (axis=0 means column-wise operation)
+means = np.mean(I_data, axis=0)
+
+# Step 2: Calculate the standard deviation of each column
+stds = np.std(I_data, axis=0)
+
+# Step 2: Initialize indices for the columns to keep
+start_index = 0
+end_index = I_data.shape[1] - 1
+
+# Step 3: Find the first column with std larger than 0.01 from the start
+for i in range(I_data.shape[1]):
+    if stds[i] >= 0.01:
+        start_index = i
+        break
+
+# Step 4: Find the first column with std larger than 0.01 from the end
+for i in range(I_data.shape[1] - 1, -1, -1):
+    if stds[i] >= 0.01:
+        end_index = i
+        break
+
+# Step 5: Slice the I_data, B_MAG_data, and EDC_MAG_data based on the start and end indices
+I_data_filtered = I_data[:, start_index:end_index + 1]
+X_resampled_filtered = X_resampled[start_index:end_index + 1]
+means_filtered = means[start_index:end_index + 1]
+stds_filtered = stds[start_index:end_index + 1]
+print(f"Data filtered from column {start_index} to {end_index}.")
+
+
+# Step 3: Normalize the array (I_data - mean) / std
+normalized_I = (I_data_filtered - means_filtered) / stds_filtered
+
+# Now normalized_data contains the result of (I - mean) / std for each column.
+
+
+# In[3]:
+
+
+import torch
+import sbi
+from sbi import utils as sbi_utils
+from sbi.inference import SNPE
+
+
+# In[4]:
+
+
+# Concatenate B and E to form the input data
+input_data = np.hstack((B_MAG_data, EDC_MAG_data))
+
+# Stack X and I to form the target data
+# target_data = np.hstack((X_data, I_data))
+target_data = normalized_I
+
+# Convert lists to numpy arrays (if not already done)
+input_data = np.array(input_data)
+target_data = np.array(target_data)
+
+from sklearn.preprocessing import MinMaxScaler
+
+# Example: Normalize data
+scaler = MinMaxScaler(feature_range=(0, 1))
+input_data= scaler.fit_transform(input_data)
+# target_data= scaler.fit_transform(target_data)
+
+input_data_tensor = torch.tensor(input_data, dtype=torch.float32)
+target_data_tensor = torch.tensor(target_data, dtype=torch.float32)
+
+
+# In[5]:
+
+
+from sklearn.model_selection import train_test_split
+
+# Split the data into training and testing sets
+input_data_train, input_data_test, target_data_train, target_data_test = train_test_split(
+    input_data, target_data, test_size=0.2, random_state=42
+)
+
+# Convert these splits to PyTorch tensors
+input_data_train_tensor = torch.tensor(input_data_train, dtype=torch.float32)  # Shape: (train_samples, 2400)
+input_data_test_tensor = torch.tensor(input_data_test, dtype=torch.float32)  # Shape: (test_samples, 2400)
+target_data_train_tensor = torch.tensor(target_data_train, dtype=torch.float32)  # Shape: (train_samples, 6)
+target_data_test_tensor = torch.tensor(target_data_test, dtype=torch.float32)  # Shape: (test_samples, 6)
+
+print("Data organized.", flush=True)
+
+
+# In[6]:
+
+
+# Define prior bounds for your data. Adjust according to your specific problem.
+prior_min = torch.tensor([input_data_tensor.min().item()] * input_data_tensor.shape[1])
+prior_max = torch.tensor([input_data_tensor.max().item()] * input_data_tensor.shape[1])
+
+# prior = sbi_utils.BoxUniform(low=prior_min, high=prior_max)
+
+# Widening the prior range slightly
+margin = 0.1 * (prior_max - prior_min)
+prior = sbi_utils.BoxUniform(low=prior_min - margin, high=prior_max + margin)
+
+
+# In[8]:
+
+
+# Train the model
+print("Start training.", flush=True)
+
+from sbi.inference import SNPE, prepare_for_sbi
+from sbi.utils.get_nn_models import posterior_nn
+
+# Initialize the SNPE with a custom neural network architecture
+neural_net = posterior_nn(model='nsf',  # Consider 'maf' (Masked Autoregressive Flow) or 'nsf' (Neural Spline Flow)
+                          hidden_features=64,  # Increase the number of hidden features
+                          num_transforms=10)  # Increase the number of transformations
+
+# Initialize SNPE with the prior and the custom neural network
+inference = SNPE(prior=prior, density_estimator=neural_net)
+
+# Set the training steps during the training process (not during `train()`)
+inference.append_simulations(input_data_train_tensor, target_data_train_tensor)
+density_estimator = inference.train(max_num_epochs=200, learning_rate=0.001, training_batch_size=64)  # Increase epochs for potentially better results
+
+# Build posterior
+posterior = inference.build_posterior(density_estimator)
+# Build the posterior using NUTS for sampling
+# posterior = inference.build_posterior(density_estimator, sample_with='mcmc')
+
+print("Training done.", flush=True)
+
+
+# In[ ]:
+
+
+# Save the model
+import torch
+
+# Define the file paths for saving
+posterior_path = os.path.join("/home/botingl/machine learning", generate_filename("posterior", "pt"))
+density_estimator_path = os.path.join("/home/botingl/machine learning", generate_filename("density_estimator", "pt"))
+
+# Save the posterior (which includes the trained model)
+torch.save(posterior, posterior_path)
+
+# Save the density estimator state dictionary
+torch.save(density_estimator.state_dict(), density_estimator_path)
+
+print("Model saved successfully.")
+
+
+# In[ ]:
+
+
+# Load saved model
+import torch
+from sbi.inference import SNPE
+from sbi.utils.get_nn_models import posterior_nn
+
+# Define the file paths for loading
+posterior_path = os.path.join("/home/botingl/machine learning", generate_filename("posterior", "pt"))
+
+# Load the posterior
+posterior = torch.load(posterior_path)
+
+print("Model loaded successfully.")
+
+
+# In[ ]:
+
+
+print("Start to evaluate the training set.", flush=True)
+# Generate predictions for all test sets
+import sys
+import numpy as np
+from tqdm import tqdm
+
+# Limit the test set to only 10 groups for faster evaluation
+train_subset_indices = np.random.choice(len(input_data_train_tensor), size=1000, replace=False)
+train_target_data_subset = target_data_train_tensor[train_subset_indices]
+train_input_data_subset = input_data_train_tensor[train_subset_indices]
+
+# Generate predictions for the test set
+predictions = []
+for i in tqdm(range(len(train_target_data_subset)), desc="Processing samples", leave=True, file=sys.stdout):
+    test_input = train_target_data_subset[i]  # This is the X and I for this test sample
+    predicted_posterior = posterior.sample((1000,), x=test_input, show_progress_bars=False)  # Disable internal progress bars
+    
+    # Extract mean prediction for B and E
+    predicted_mean = predicted_posterior.mean(dim=0)
+    predictions.append(predicted_mean)
+    
+    sys.stdout.flush()  # Manually flush output
+
+# Convert predictions to numpy array
+predictions = torch.stack(predictions).detach().numpy()
+
+print("Evaluation done for the training set.", flush=True)
+
+
+# In[ ]:
+
+
+output_dir = "/home/botingl/machine learning"
+# Convert the true B and E values to numpy array
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+true_values = train_input_data_subset.numpy()
+
+def normalized_root_mean_squared_error(y_true, y_pred):
+    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+    return rmse / (y_true.max() - y_true.min())
+
+# Calculate evaluation metrics
+mae = mean_absolute_error(true_values, predictions)
+rmse = np.sqrt(mean_squared_error(true_values, predictions))
+r2 = r2_score(true_values, predictions)
+nrmse = normalized_root_mean_squared_error(true_values, predictions)
+
+print(f'NRMSE: {nrmse:.2f}')
+print(f'Mean Absolute Error (MAE): {mae}')
+print(f'Root Mean Squared Error (RMSE): {rmse}')
+print(f'R^2 Score: {r2}')
+
+# Save evaluation metrics to a text file
+metrics_file = os.path.join(output_dir, generate_filename("evaluation_metrics_train", "txt"))
+with open(metrics_file, "w") as f:
+    f.write(f"Mean Absolute Error (MAE): {mae}\n")
+    f.write(f"Root Mean Squared Error (RMSE): {rmse}\n")
+    f.write(f"R^2 Score: {r2}\n")
+    f.write(f"Normalized RMSE (NRMSE): {nrmse}\n")
+
+# Optionally, you can visualize the results
+import matplotlib.pyplot as plt
+
+# Plot the true vs. predicted B and E values
+plt.figure(figsize=(15, 10))
+
+# Plotting for B components
+for i in range(3):
+    plt.subplot(2, 3, i+1)
+    plt.scatter(true_values[:, i], predictions[:, i], alpha=0.5)
+    plt.xlabel(f'True B[{i+1}]')
+    plt.ylabel(f'Predicted B[{i+1}]')
+    plt.title(f'True vs. Predicted B[{i+1}]')
+
+# Plotting for E components
+for i in range(3):
+    plt.subplot(2, 3, i+4)
+    plt.scatter(true_values[:, i+3], predictions[:, i+3], alpha=0.5)
+    plt.xlabel(f'True E[{i+1}]')
+    plt.ylabel(f'Predicted E[{i+1}]')
+    plt.title(f'True vs. Predicted E[{i+1}]')
+
+plt.tight_layout()
+
+figure_file = os.path.join(output_dir, generate_filename("true_vs_predictions_train", "png"))
+plt.savefig(figure_file, dpi=300, facecolor='white')
+plt.show()
+plt.close()
+
+
+# In[ ]:
+
+
+print("Start to evaluate the test set.", flush=True)
+# Generate predictions for all test sets
+import sys
+import numpy as np
+from tqdm import tqdm
+
+# Generate predictions for the test set
+predictions = []
+for i in tqdm(range(len(target_data_test)), desc="Processing samples", leave=True, file=sys.stdout):
+    test_input = target_data_test[i]  # This is the X and I for this test sample
+    predicted_posterior = posterior.sample((1000,), x=test_input, show_progress_bars=False)  # Disable internal progress bars
+    
+    # Extract mean prediction for B and E
+    predicted_mean = predicted_posterior.mean(dim=0)
+    predictions.append(predicted_mean)
+    
+    sys.stdout.flush()  # Manually flush output
+
+# Convert predictions to numpy array
+predictions = torch.stack(predictions).detach().numpy()
+
+print("Evaluation done for the test set.", flush=True)
+
+
+# In[ ]:
+
+
+# Evaluate the model using all test sets
+output_dir = "/home/botingl/machine learning"
+# Convert the true B and E values to numpy array
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+true_values = input_data_test
+
+def normalized_root_mean_squared_error(y_true, y_pred):
+    rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+    return rmse / (y_true.max() - y_true.min())
+
+# Calculate evaluation metrics
+mae = mean_absolute_error(true_values, predictions)
+rmse = np.sqrt(mean_squared_error(true_values, predictions))
+r2 = r2_score(true_values, predictions)
+nrmse = normalized_root_mean_squared_error(input_data_test, predictions)
+
+print(f'NRMSE: {nrmse:.2f}')
+print(f'Mean Absolute Error (MAE): {mae}')
+print(f'Root Mean Squared Error (RMSE): {rmse}')
+print(f'R^2 Score: {r2}')
+
+# Save evaluation metrics to a text file
+metrics_file = os.path.join(output_dir, generate_filename("evaluation_metrics_test", "txt"))
+with open(metrics_file, "w") as f:
+    f.write(f"Mean Absolute Error (MAE): {mae}\n")
+    f.write(f"Root Mean Squared Error (RMSE): {rmse}\n")
+    f.write(f"R^2 Score: {r2}\n")
+    f.write(f"Normalized RMSE (NRMSE): {nrmse}\n")
+
+# Optionally, you can visualize the results
+import matplotlib.pyplot as plt
+
+# Plot the true vs. predicted B and E values
+plt.figure(figsize=(15, 10))
+
+# Plotting for B components
+for i in range(3):
+    plt.subplot(2, 3, i+1)
+    plt.scatter(true_values[:, i], predictions[:, i], alpha=0.5)
+    plt.xlabel(f'True B[{i+1}]')
+    plt.ylabel(f'Predicted B[{i+1}]')
+    plt.title(f'True vs. Predicted B[{i+1}]')
+
+# Plotting for E components
+for i in range(3):
+    plt.subplot(2, 3, i+4)
+    plt.scatter(true_values[:, i+3], predictions[:, i+3], alpha=0.5)
+    plt.xlabel(f'True E[{i+1}]')
+    plt.ylabel(f'Predicted E[{i+1}]')
+    plt.title(f'True vs. Predicted E[{i+1}]')
+
+plt.tight_layout()
+
+figure_file = os.path.join(output_dir, generate_filename("true_vs_predictions_test", "png"))
+plt.savefig(figure_file, dpi=300, facecolor='white')
+plt.show()
+plt.close()
+
+
+# In[ ]:
+
+
+# # Limit the test set to only 10 groups for faster evaluation
+# test_subset_indices = np.random.choice(len(target_data_test_tensor), size=10, replace=False)
+# test_target_data_subset = target_data_test_tensor[test_subset_indices]
+# test_input_data_subset = input_data_test_tensor[test_subset_indices]
+
+# # Example of making predictions on the limited test set
+# predictions = []
+# for i in range(len(test_target_data_subset)):
+#     test_input = test_target_data_subset[i]
+#     predicted_posterior = posterior.sample((1000,), x=test_input)
+    
+#     # Extract mean prediction
+#     predicted_mean = predicted_posterior.mean(dim=0)
+#     predictions.append(predicted_mean)
+
+# # Convert predictions to a numpy array for further evaluation
+# predictions = torch.stack(predictions).detach().numpy()
+
+
+# In[ ]:
+
+
+# # Plot and compare the 10 groups
+# import matplotlib.pyplot as plt
+# import numpy as np
+
+# # Assume 'predictions' is the numpy array with predicted values
+# # and 'test_data_subset' is the corresponding actual test data.
+
+# # Number of test sets
+# num_test_sets = predictions.shape[0]
+
+# # Labels for the B and E values in each test set
+# B_labels = ['B1', 'B2', 'B3']  # Adjust based on your specific data
+# E_labels = ['E1', 'E2', 'E3']  # Adjust based on your specific data
+
+# # Plotting each test set
+# for i in range(num_test_sets):
+#     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))  # Two subplots side by side
+    
+#     # Indices for the bars
+#     B_indices = np.arange(3)  # Indices for B1, B2, B3
+#     E_indices = np.arange(3)  # Indices for E1, E2, E3
+    
+#     # Width of the bars
+#     width = 0.2
+    
+#     # Bar plot for B values
+#     ax1.bar(B_indices, test_input_data_subset[i, :3], width, label='Actual B')
+#     ax1.bar(B_indices + width, predictions[i, :3], width, label='Predicted B')
+#     ax1.set_xlabel('B Value Index')
+#     ax1.set_ylabel('B Value Magnitude')
+#     ax1.set_title(f'Comparison of Actual vs. Predicted B Values for Test Set {i+1}')
+#     ax1.set_xticks(B_indices + width / 2)
+#     ax1.set_xticklabels(B_labels)
+#     ax1.legend()
+    
+#     # Bar plot for E values
+#     ax2.bar(E_indices, test_input_data_subset[i, 3:], width, label='Actual E')
+#     ax2.bar(E_indices + width, predictions[i, 3:], width, label='Predicted E')
+#     ax2.set_xlabel('E Value Index')
+#     ax2.set_ylabel('E Value Magnitude')
+#     ax2.set_title(f'Comparison of Actual vs. Predicted E Values for Test Set {i+1}')
+#     ax2.set_xticks(E_indices + width / 2)
+#     ax2.set_xticklabels(E_labels)
+#     ax2.legend()
+    
+#     # Adjust layout to prevent overlap
+#     plt.tight_layout()
+    
+#     # Show plot
+#     plt.show()
+
+
+# In[ ]:
+
+
+# from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+# import numpy as np
+
+# def normalized_root_mean_squared_error(y_true, y_pred):
+#     rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+#     return rmse / (y_true.max() - y_true.min())
+
+# # Calculate NRMSE for each test set
+# nrmse = normalized_root_mean_squared_error(test_input_data_subset.numpy(), predictions)
+# print(f'NRMSE: {nrmse:.2f}')
+
+# # Calculate R-squared (R²)
+# r2 = r2_score(test_input_data_subset, predictions)
+# print(f"R-squared (R²): {r2}")
+
